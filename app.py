@@ -338,20 +338,49 @@ def send_one_whatsapp_template(to_e164: str, content_sid: str, content_variables
 @app.route("/send-template", methods=["POST"])
 def send_template():
     """
-    Body JSON:
+    Formatos aceptados:
+
+    1) Formato simple (variables globales):
     {
-      "content_sid": "CHxxxxxxxxxxxxxx",
-      "variables": { "1": "Davani", "2": "#1234" },   # opcional
-      "telefonos": ["656123...", "..."]
+      "content_sid": "HXxxxx...",
+      "variables": { "1": "Nombre", "2": "#1234" },
+      "telefonos": ["656123...", "656987..."]
+    }
+
+    2) Formato por lotes (variables por número):
+    {
+      "content_sid": "HXxxxx...",
+      "lotes": [
+        {
+          "telefono": "2461005513",
+          "vars": {
+            "1": "Lic. María López",
+            "2": "A-2025/0456",
+            "3": "EXP-001234",
+            "4": "Se agendó cita para 12/11/2025"
+          }
+        },
+        {
+          "telefono": "otro_numero",
+          "vars": { ... }
+        }
+      ]
     }
     """
     data = request.get_json(force=True, silent=True) or {}
     content_sid = (data.get("content_sid") or "").strip()
-    variables = data.get("variables") or {}
+    variables_globales = data.get("variables") or {}
     nums = data.get("telefonos") or []
+    lotes = data.get("lotes") or []
 
-    if not content_sid or not isinstance(nums, list) or not nums:
-        return jsonify(error="Proporciona 'content_sid' y lista 'telefonos'"), 400
+    if not content_sid:
+        return jsonify(error="Proporciona 'content_sid'"), 400
+
+    # Si hay lotes, usamos ese modo. Si no, usamos telefonos + variables_globales.
+    usar_lotes = bool(lotes)
+
+    if not usar_lotes and (not isinstance(nums, list) or not nums):
+        return jsonify(error="Proporciona lista 'telefonos' o 'lotes'"), 400
 
     invalid_by_lookup = []
     skipped_not_mobile = []
@@ -361,51 +390,112 @@ def send_template():
     base = valid_public_base()
     status_callback_url = f"{base}/twilio/status" if base else None
 
-    for raw in nums:
-        raw_str = str(raw).strip()
-        try:
-            e164 = normalize_to_e164(raw_str)
-        except ValueError:
-            invalid_by_lookup.append(raw_str)
-            continue
+    if usar_lotes:
+        # ---- MODO LOTES ----
+        for lote in lotes:
+            raw_str = str(lote.get("telefono", "")).strip()
+            vars_lote = lote.get("vars") or variables_globales or {}
 
-        is_valid, line_type = lookup_is_valid(e164)
-        if not is_valid:
-            invalid_by_lookup.append(raw_str)
-            continue
+            if not raw_str:
+                continue
 
-        allowed, reason = whatsapp_policy_allows(line_type)
-        if not allowed:
-            skipped_not_mobile.append(raw_str)
-            skipped_detail.append({
-                "numero": raw_str,
-                "line_type": line_type,
-                "canal": "whatsapp",
-                "reason": reason
-            })
-            continue
+            try:
+                e164 = normalize_to_e164(raw_str)
+            except ValueError:
+                invalid_by_lookup.append(raw_str)
+                continue
 
-        try:
-            sid = send_one_whatsapp_template(e164, content_sid, variables, status_callback_url)
-            STATE["sid_to_number"][sid] = e164
-            STATE["delivery"][e164] = {"status": "queued", "sid": sid, "channel": "whatsapp", "template": content_sid}
-            queued.append(raw_str)
-        except Exception as ex:
-            STATE["delivery"][e164] = {
-                "status": "failed_on_send",
-                "reason": str(ex),
-                "channel": "whatsapp",
-                "template": content_sid
-            }
+            is_valid, line_type = lookup_is_valid(e164)
+            if not is_valid:
+                invalid_by_lookup.append(raw_str)
+                continue
+
+            allowed, reason = whatsapp_policy_allows(line_type)
+            if not allowed:
+                skipped_not_mobile.append(raw_str)
+                skipped_detail.append({
+                    "numero": raw_str,
+                    "line_type": line_type,
+                    "canal": "whatsapp",
+                    "reason": reason
+                })
+                continue
+
+            try:
+                sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
+                STATE["sid_to_number"][sid] = e164
+                STATE["delivery"][e164] = {
+                    "status": "queued",
+                    "sid": sid,
+                    "channel": "whatsapp",
+                    "template": content_sid,
+                    "vars": vars_lote
+                }
+                queued.append(raw_str)
+            except Exception as ex:
+                STATE["delivery"][e164] = {
+                    "status": "failed_on_send",
+                    "reason": str(ex),
+                    "channel": "whatsapp",
+                    "template": content_sid,
+                    "vars": vars_lote
+                }
+    else:
+        # ---- MODO SIMPLE (telefonos + variables_globales) ----
+        for raw in nums:
+            raw_str = str(raw).strip()
+            try:
+                e164 = normalize_to_e164(raw_str)
+            except ValueError:
+                invalid_by_lookup.append(raw_str)
+                continue
+
+            is_valid, line_type = lookup_is_valid(e164)
+            if not is_valid:
+                invalid_by_lookup.append(raw_str)
+                continue
+
+            allowed, reason = whatsapp_policy_allows(line_type)
+            if not allowed:
+                skipped_not_mobile.append(raw_str)
+                skipped_detail.append({
+                    "numero": raw_str,
+                    "line_type": line_type,
+                    "canal": "whatsapp",
+                    "reason": reason
+                })
+                continue
+
+            try:
+                sid = send_one_whatsapp_template(e164, content_sid, variables_globales, status_callback_url)
+                STATE["sid_to_number"][sid] = e164
+                STATE["delivery"][e164] = {
+                    "status": "queued",
+                    "sid": sid,
+                    "channel": "whatsapp",
+                    "template": content_sid,
+                    "vars": variables_globales
+                }
+                queued.append(raw_str)
+            except Exception as ex:
+                STATE["delivery"][e164] = {
+                    "status": "failed_on_send",
+                    "reason": str(ex),
+                    "channel": "whatsapp",
+                    "template": content_sid,
+                    "vars": variables_globales
+                }
 
     return jsonify({
         "invalid_by_lookup": invalid_by_lookup,
         "queued": queued,
         "skipped_not_mobile": skipped_not_mobile,
         "skipped_detail": skipped_detail,
-        "note": "Se usó plantilla (contentSid). Si no llegan, revisa /status-detail/<sid> para error_code."
+        "note": (
+            "Plantilla personalizada enviada por lote. Revisa /report y /status-detail/<sid>. "
+            "Si ves muchos 'invalid_by_lookup' quizá Twilio Lookup no reconoce esos números."
+        )
     }), 200
-
 
 @app.route("/tester", methods=["GET"])
 def tester():
