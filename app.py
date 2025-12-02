@@ -39,7 +39,7 @@ STATE = {
     "last_summary": {},
 }
 
-BACKEND_VERSION = "4.2.0"
+BACKEND_VERSION = "4.1.0"
 
 
 # =========================
@@ -59,9 +59,8 @@ def valid_public_base() -> str:
 def normalize_to_e164(raw_number: str, region: str = None) -> str:
     """
     Convierte un número a E.164; lanza ValueError si no es posible.
-    Forzamos región MX si no viene una región válida.
     """
-    region = region or os.getenv("DEFAULT_REGION", "MX").strip() or "MX"
+    region = region or DEFAULT_REGION
 
     try:
         pn = phonenumbers.parse(str(raw_number), region)
@@ -359,7 +358,6 @@ def send_template():
 @app.route("/send-template-bulk-personalizado", methods=["POST"])
 def send_template_bulk_personalizado():
     """
-    DEBUG DO:
     Envía plantillas por lote SIN Twilio Lookup.
     Body:
     {
@@ -386,7 +384,7 @@ def send_template_bulk_personalizado():
     if not isinstance(lotes, list) or not lotes:
         return jsonify(error="Falta lista 'lotes'"), 400
 
-    invalid_by_norm = []      # 👈 SOLO errores de normalización
+    invalid_by_norm = []
     queued = []
     failed_on_send = []
 
@@ -440,7 +438,7 @@ def send_template_bulk_personalizado():
         "invalid_by_norm": invalid_by_norm,
         "queued": queued,
         "failed_on_send": failed_on_send,
-        "note": "DEBUG DO: /send-template-bulk-personalizado SIN Twilio Lookup",
+        "note": "DEBUG: /send-template-bulk-personalizado SIN Twilio Lookup",
     }), 200
 
 
@@ -531,6 +529,7 @@ def twilio_incoming_fallback():
 
 @app.route("/tester", methods=["GET"])
 def tester():
+    # HTML/JS muy simple y solo ASCII para evitar errores raros
     html = """
 <!doctype html>
 <html lang="es">
@@ -558,19 +557,19 @@ def tester():
 <body>
   <div class="wrap">
     <h1>Tester — WhatsApp Bulk</h1>
-    <p><small>Pega tu JSON, elige método y endpoint. Esto hace <code>fetch</code> directo a tu backend.</small></p>
-    <p><small>Versión backend: """ + BACKEND_VERSION + """ — endpoints /send-bulk, /send-template, /send-template-bulk-personalizado.</small></p>
+    <p><small>Pega tu JSON, elige metodo y endpoint. Esto hace fetch directo a tu backend.</small></p>
+    <p><small>Version backend: 4.1.0 — endpoints /send-bulk, /send-template, /send-template-bulk-personalizado.</small></p>
 
     <div class="row">
       <div style="flex:1 1 140px;">
-        <label>Método</label>
+        <label>Metodo</label>
         <select id="method">
           <option>POST</option>
           <option>GET</option>
         </select>
       </div>
       <div style="flex:1 1 240px;">
-        <label>Endpoint rápido</label>
+        <label>Endpoint rapido</label>
         <select id="quick">
           <option value="/send-bulk">/send-bulk</option>
           <option value="/send-template">/send-template</option>
@@ -586,7 +585,7 @@ def tester():
       </div>
     </div>
 
-    <label>Body JSON (solo se envía si el método es POST)</label>
+    <label>Body JSON (solo se envia si el metodo es POST)</label>
     <textarea id="body"></textarea>
 
     <div class="btns" style="margin-top:10px;">
@@ -597,7 +596,7 @@ def tester():
       <button class="primary" id="sendBtn">Enviar</button>
     </div>
 
-    <p><small>Regla: token exige 2 variables ("1", "2"). content_di exige 4 ("1"–"4").</small></p>
+    <p><small>Regla: token usa variables "1" y "2". content_di usa "1" a "4".</small></p>
 
     <h3>Respuesta</h3>
     <pre id="out">{}</pre>
@@ -625,7 +624,7 @@ def tester():
       methodEl.value = 'POST';
       endEl.value = '/send-bulk';
       bodyEl.value = JSON.stringify({
-        "mensaje": "Su trámite ha sido firmado; acuda a la dependencia con su documentación.",
+        "mensaje": "Su tramite ha sido firmado; acuda a la dependencia con su documentacion.",
         "telefonos": ["6561234657","6568954038","6567689214"]
       }, null, 2);
     });
@@ -647,12 +646,12 @@ def tester():
         "content_sid": "HX84a8154d5e0e2fb79b55f0053e2e5a55",
         "lotes": [
           {
-            "telefono": "6142249654",
+            "telefono": "6565556666",
             "vars": {
-              "1": "Jaime Prueba",
-              "2": "Licencia de construcción",
-              "3": "DGDU/LC/0069/2025",
-              "4": "Verificación Rechazada"
+              "1": "Lic. Maria Lopez",
+              "2": "A-2025/0456",
+              "3": "EXP-001234",
+              "4": "Se agenda cita para 12/11/2025"
             }
           }
         ]
@@ -677,7 +676,7 @@ def tester():
         try {
           payload = bodyEl.value ? JSON.parse(bodyEl.value) : {};
         } catch (e) {
-          outEl.textContent = "❌ JSON inválido en el body: " + e.message;
+          outEl.textContent = "JSON invalido en el body: " + e.message;
           return;
         }
         init.headers['Content-Type'] = 'application/json';
@@ -691,11 +690,11 @@ def tester():
         try {
           const json = JSON.parse(text);
           outEl.textContent = JSON.stringify(json, null, 2);
-        } catch {
+        } catch (e2) {
           outEl.textContent = text;
         }
       } catch (err) {
-        outEl.textContent = "❌ Error de red: " + (err?.message || err);
+        outEl.textContent = "Error de red: " + (err && err.message ? err.message : err);
       }
     });
 
@@ -706,6 +705,7 @@ def tester():
 </html>
     """
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
