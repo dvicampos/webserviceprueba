@@ -39,7 +39,7 @@ STATE = {
     "last_summary": {},
 }
 
-BACKEND_VERSION = "4.1.0"
+BACKEND_VERSION = "4.2.0"
 
 
 # =========================
@@ -386,7 +386,7 @@ def send_template_bulk_personalizado():
     if not isinstance(lotes, list) or not lotes:
         return jsonify(error="Falta lista 'lotes'"), 400
 
-    invalid_by_norm = []      # 👈 ahora se llama así
+    invalid_by_norm = []      # 👈 SOLO errores de normalización
     queued = []
     failed_on_send = []
 
@@ -435,7 +435,7 @@ def send_template_bulk_personalizado():
             })
 
     return jsonify({
-        "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4.1",
+        "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4.2",
         "received": data,
         "invalid_by_norm": invalid_by_norm,
         "queued": queued,
@@ -615,90 +615,91 @@ def tester():
     const loadTemplateBulk = document.getElementById('loadTemplateBulk');
     const loadLookup = document.getElementById('loadLookup');
 
-    quickEl.addEventListener('change', () => {{
+    quickEl.addEventListener('change', () => {
       const v = quickEl.value;
       if (v === '__custom') return;
       endEl.value = v;
-    }});
+    });
 
-    loadSend.addEventListener('click', () => {{
+    loadSend.addEventListener('click', () => {
       methodEl.value = 'POST';
       endEl.value = '/send-bulk';
-      bodyEl.value = JSON.stringify({{
+      bodyEl.value = JSON.stringify({
         "mensaje": "Su trámite ha sido firmado; acuda a la dependencia con su documentación.",
         "telefonos": ["6561234657","6568954038","6567689214"]
-      }}, null, 2);
-    }});
+      }, null, 2);
+    });
 
-    loadTemplate.addEventListener('click', () => {{
+    loadTemplate.addEventListener('click', () => {
       methodEl.value = 'POST';
       endEl.value = '/send-template';
-      bodyEl.value = JSON.stringify({{
+      bodyEl.value = JSON.stringify({
         "content_sid": "HXxxxxxxxxxxxxxxxxxxxxxxxx",
-        "variables": {{"1":"Nombre prueba","2":"#FOLIO-123"}},
+        "variables": {"1":"Nombre prueba","2":"#FOLIO-123"},
         "telefonos": ["6561234657"]
-      }}, null, 2);
-    }});
+      }, null, 2);
+    });
 
-    loadTemplateBulk.addEventListener('click', () => {{
+    loadTemplateBulk.addEventListener('click', () => {
       methodEl.value = 'POST';
       endEl.value = '/send-template-bulk-personalizado';
-      bodyEl.value = JSON.stringify({{
+      bodyEl.value = JSON.stringify({
         "content_sid": "HX84a8154d5e0e2fb79b55f0053e2e5a55",
         "lotes": [
-          {{
+          {
             "telefono": "6142249654",
-            "vars": {{
+            "vars": {
               "1": "Jaime Prueba",
               "2": "Licencia de construcción",
               "3": "DGDU/LC/0069/2025",
               "4": "Verificación Rechazada"
-            }}
-          }}
+            }
+          }
         ]
-      }}, null, 2);
-    }});
+      }, null, 2);
+    });
 
-    loadLookup.addEventListener('click', () => {{
+    loadLookup.addEventListener('click', () => {
       methodEl.value = 'POST';
       endEl.value = '/debug-lookup';
-      bodyEl.value = JSON.stringify({{
+      bodyEl.value = JSON.stringify({
         "telefonos": ["6142249654","2463095291","6563023022"]
-      }}, null, 2);
-    }});
+      }, null, 2);
+    });
 
-    sendBtn.addEventListener('click', async () => {{
+    sendBtn.addEventListener('click', async () => {
       const method = methodEl.value.trim();
       const endpoint = endEl.value.trim() || '/send-bulk';
-      let init = {{ method, headers: {{}} }};
+      let init = { method, headers: {} };
 
-      if (method === 'POST') {{
-        let payload = {{}};
-        try {{
-          payload = bodyEl.value ? JSON.parse(bodyEl.value) : {{}};
-        }} catch (e) {{
+      if (method === 'POST') {
+        let payload = {};
+        try {
+          payload = bodyEl.value ? JSON.parse(bodyEl.value) : {};
+        } catch (e) {
           outEl.textContent = "❌ JSON inválido en el body: " + e.message;
           return;
-        }}
+        }
         init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(payload);
-      }}
+      }
 
       outEl.textContent = "Enviando...";
-      try {{
+      try {
         const res = await fetch(endpoint, init);
         const text = await res.text();
-        try {{
+        try {
           const json = JSON.parse(text);
           outEl.textContent = JSON.stringify(json, null, 2);
-        }} catch {{
+        } catch {
           outEl.textContent = text;
-        }}
-      }} catch (err) {{
+        }
+      } catch (err) {
         outEl.textContent = "❌ Error de red: " + (err?.message || err);
-      }}
-    }});
+      }
+    });
 
+    // Carga por defecto ejemplo /send-bulk
     loadSend.click();
   </script>
 </body>
