@@ -588,6 +588,89 @@ def tester():
     """
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
+@app.route("/send-template-bulk-personalizado", methods=["POST"])
+def send_template_bulk_personalizado():
+    """
+    DEBUG DO:
+    Envía plantillas por lote SIN Twilio Lookup.
+    Body:
+    {
+      "content_sid": "HX84a8...",
+      "lotes": [
+        {
+          "telefono": "2463095291",
+          "vars": {
+            "1": "Jaime Prueba",
+            "2": "Licencia...",
+            "3": "DGDU/LC/0069/2025",
+            "4": "Verificación Rechazada"
+          }
+        },
+        ...
+      ]
+    }
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    content_sid = (data.get("content_sid") or "").strip()
+    lotes = data.get("lotes") or []
+
+    if not content_sid:
+        return jsonify(error="Falta 'content_sid'"), 400
+    if not isinstance(lotes, list) or not lotes:
+        return jsonify(error="Falta lista 'lotes'"), 400
+
+    invalid_by_lookup = []   # aquí solo meteremos errores de normalización
+    queued = []
+    skipped_not_mobile = []
+    skipped_detail = []
+
+    base = valid_public_base()
+    status_callback_url = f"{base}/twilio/status" if base else None
+
+    for lote in lotes:
+        raw_str = str(lote.get("telefono", "")).strip()
+        vars_lote = lote.get("vars") or {}
+
+        if not raw_str:
+            continue
+
+        # 1) SOLO normalizamos con phonenumbers
+        try:
+            e164 = normalize_to_e164(raw_str)
+        except ValueError as e:
+            invalid_by_lookup.append(f"{raw_str} ({e})")
+            continue
+
+        # 2) Enviar plantilla DIRECTO, sin lookup
+        try:
+            sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
+            STATE["sid_to_number"][sid] = e164
+            STATE["delivery"][e164] = {
+                "status": "queued",
+                "sid": sid,
+                "channel": "whatsapp",
+                "template": content_sid,
+                "vars": vars_lote,
+            }
+            queued.append(raw_str)
+        except Exception as ex:
+            STATE["delivery"][e164] = {
+                "status": "failed_on_send",
+                "reason": str(ex),
+                "channel": "whatsapp",
+                "template": content_sid,
+                "vars": vars_lote,
+            }
+
+    return jsonify({
+        "invalid_by_lookup": invalid_by_lookup,
+        "queued": queued,
+        "skipped_not_mobile": skipped_not_mobile,
+        "skipped_detail": skipped_detail,
+        "note": "DEBUG DO: /send-template-bulk-personalizado SIN Lookup"
+    }), 200
+
+
 if __name__ == "__main__":
     # En desarrollo, usa puerto 5000
     app.run(host="0.0.0.0", port=5000, debug=True)
