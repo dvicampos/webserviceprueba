@@ -337,36 +337,6 @@ def send_one_whatsapp_template(to_e164: str, content_sid: str, content_variables
 
 @app.route("/send-template", methods=["POST"])
 def send_template():
-    """
-    Formatos aceptados:
-
-    1) Formato simple (variables globales):
-    {
-      "content_sid": "HXxxxx...",
-      "variables": { "1": "Nombre", "2": "#1234" },
-      "telefonos": ["656123...", "656987..."]
-    }
-
-    2) Formato por lotes (variables por número):
-    {
-      "content_sid": "HXxxxx...",
-      "lotes": [
-        {
-          "telefono": "2461005513",
-          "vars": {
-            "1": "Lic. María López",
-            "2": "A-2025/0456",
-            "3": "EXP-001234",
-            "4": "Se agendó cita para 12/11/2025"
-          }
-        },
-        {
-          "telefono": "otro_numero",
-          "vars": { ... }
-        }
-      ]
-    }
-    """
     data = request.get_json(force=True, silent=True) or {}
     content_sid = (data.get("content_sid") or "").strip()
     variables_globales = data.get("variables") or {}
@@ -376,7 +346,6 @@ def send_template():
     if not content_sid:
         return jsonify(error="Proporciona 'content_sid'"), 400
 
-    # Si hay lotes, usamos ese modo. Si no, usamos telefonos + variables_globales.
     usar_lotes = bool(lotes)
 
     if not usar_lotes and (not isinstance(nums, list) or not nums):
@@ -391,7 +360,7 @@ def send_template():
     status_callback_url = f"{base}/twilio/status" if base else None
 
     if usar_lotes:
-        # ---- MODO LOTES ----
+        # ---------- MODO LOTES (SIN LOOKUP) ----------
         for lote in lotes:
             raw_str = str(lote.get("telefono", "")).strip()
             vars_lote = lote.get("vars") or variables_globales or {}
@@ -399,28 +368,14 @@ def send_template():
             if not raw_str:
                 continue
 
+            # 1) Normaliza SOLO con phonenumbers
             try:
                 e164 = normalize_to_e164(raw_str)
             except ValueError:
                 invalid_by_lookup.append(raw_str)
                 continue
 
-            is_valid, line_type = lookup_is_valid(e164)
-            if not is_valid:
-                invalid_by_lookup.append(raw_str)
-                continue
-
-            allowed, reason = whatsapp_policy_allows(line_type)
-            if not allowed:
-                skipped_not_mobile.append(raw_str)
-                skipped_detail.append({
-                    "numero": raw_str,
-                    "line_type": line_type,
-                    "canal": "whatsapp",
-                    "reason": reason
-                })
-                continue
-
+            # 2) Enviar directo SIN lookup ni política
             try:
                 sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
                 STATE["sid_to_number"][sid] = e164
@@ -441,29 +396,13 @@ def send_template():
                     "vars": vars_lote
                 }
     else:
-        # ---- MODO SIMPLE (telefonos + variables_globales) ----
+        # ---------- MODO SIMPLE (telefonos + variables_globales, SIN LOOKUP) ----------
         for raw in nums:
             raw_str = str(raw).strip()
             try:
                 e164 = normalize_to_e164(raw_str)
             except ValueError:
                 invalid_by_lookup.append(raw_str)
-                continue
-
-            is_valid, line_type = lookup_is_valid(e164)
-            if not is_valid:
-                invalid_by_lookup.append(raw_str)
-                continue
-
-            allowed, reason = whatsapp_policy_allows(line_type)
-            if not allowed:
-                skipped_not_mobile.append(raw_str)
-                skipped_detail.append({
-                    "numero": raw_str,
-                    "line_type": line_type,
-                    "canal": "whatsapp",
-                    "reason": reason
-                })
                 continue
 
             try:
@@ -491,10 +430,7 @@ def send_template():
         "queued": queued,
         "skipped_not_mobile": skipped_not_mobile,
         "skipped_detail": skipped_detail,
-        "note": (
-            "Plantilla personalizada enviada por lote. Revisa /report y /status-detail/<sid>. "
-            "Si ves muchos 'invalid_by_lookup' quizá Twilio Lookup no reconoce esos números."
-        )
+        "note": "Plantilla enviada SIN Twilio Lookup (modo debug). Revisa /report y /status-detail/<sid>."
     }), 200
 
 @app.route("/tester", methods=["GET"])
