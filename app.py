@@ -61,11 +61,12 @@ def normalize_to_e164(raw_number: str, region: str = None) -> str:
     Convierte un número a E.164; lanza ValueError si no es posible.
     Forzamos región MX si no viene una región válida.
     """
-    region = region or DEFAULT_REGION or "MX"
+    region = region or os.getenv("DEFAULT_REGION", "MX").strip() or "MX"
+
     try:
         pn = phonenumbers.parse(str(raw_number), region)
         if not phonenumbers.is_possible_number(pn) or not phonenumbers.is_valid_number(pn):
-            raise ValueError("Invalid number for region %s" % region)
+            raise ValueError(f"Invalid number for region {region}")
         return phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164)
     except NumberParseException as e:
         raise ValueError(str(e))
@@ -358,21 +359,21 @@ def send_template():
 @app.route("/send-template-bulk-personalizado", methods=["POST"])
 def send_template_bulk_personalizado():
     """
-    Envía PLANTILLAS por lote SIN Twilio Lookup.
+    DEBUG DO:
+    Envía plantillas por lote SIN Twilio Lookup.
     Body:
     {
       "content_sid": "HX84a8...",
       "lotes": [
         {
-          "telefono": "6142249654",
+          "telefono": "2463095291",
           "vars": {
-            "1": "Nombre",
-            "2": "Tipo trámite",
-            "3": "Folio",
-            "4": "Mensaje"
+            "1": "Lic. María López",
+            "2": "A-2025/0456",
+            "3": "EXP-001234",
+            "4": "Se agendó cita para 12/11/2025"
           }
-        },
-        ...
+        }
       ]
     }
     """
@@ -385,7 +386,7 @@ def send_template_bulk_personalizado():
     if not isinstance(lotes, list) or not lotes:
         return jsonify(error="Falta lista 'lotes'"), 400
 
-    invalid_by_norm = []
+    invalid_by_norm = []      # 👈 ahora se llama así
     queued = []
     failed_on_send = []
 
@@ -395,17 +396,18 @@ def send_template_bulk_personalizado():
     for lote in lotes:
         raw_str = str(lote.get("telefono", "")).strip()
         vars_lote = lote.get("vars") or {}
+
         if not raw_str:
             continue
 
-        # 1) SOLO normalizamos
+        # 1) SOLO normalizamos (sin lookup Twilio)
         try:
             e164 = normalize_to_e164(raw_str)
         except ValueError as e:
             invalid_by_norm.append(f"{raw_str} ({e})")
             continue
 
-        # 2) Enviar
+        # 2) Enviar plantilla DIRECTO a Twilio
         try:
             sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
             STATE["sid_to_number"][sid] = e164
@@ -426,24 +428,20 @@ def send_template_bulk_personalizado():
                 "template": content_sid,
                 "vars": vars_lote,
             }
-            failed_on_send.append(
-                {
-                    "numero": raw_str,
-                    "e164": e164,
-                    "reason": err_str,
-                }
-            )
+            failed_on_send.append({
+                "numero": raw_str,
+                "e164": e164,
+                "reason": err_str,
+            })
 
-    return jsonify(
-        {
-            "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4.1",
-            "received": data,
-            "invalid_by_norm": invalid_by_norm,
-            "queued": queued,
-            "failed_on_send": failed_on_send,
-            "note": "DEBUG DO: /send-template-bulk-personalizado SIN Twilio Lookup",
-        }
-    ), 200
+    return jsonify({
+        "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4.1",
+        "received": data,
+        "invalid_by_norm": invalid_by_norm,
+        "queued": queued,
+        "failed_on_send": failed_on_send,
+        "note": "DEBUG DO: /send-template-bulk-personalizado SIN Twilio Lookup",
+    }), 200
 
 
 # =========================
