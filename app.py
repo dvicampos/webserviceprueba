@@ -12,37 +12,43 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# ==========================
-#  CONFIG TWILIO / GLOBAL
-# ==========================
+# =========================
+#   TWILIO CONFIG
+# =========================
 ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
 if not ACCOUNT_SID or not AUTH_TOKEN:
     raise RuntimeError("Faltan TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN en .env")
 
 client = Client(ACCOUNT_SID, AUTH_TOKEN)
 
-DEFAULT_REGION = (os.getenv("DEFAULT_REGION") or "MX").strip()
-FROM_WHATSAPP = os.getenv("TWILIO_WHATSAPP_FROM")  # ej: whatsapp:+14155238886
+# Región por defecto para phonenumbers
+DEFAULT_REGION_ENV = (os.getenv("DEFAULT_REGION") or "").strip()
+DEFAULT_REGION = DEFAULT_REGION_ENV if DEFAULT_REGION_ENV else "MX"
+
+FROM_WHATSAPP = os.getenv("TWILIO_WHATSAPP_FROM")  # ej. whatsapp:+14155238886
 MSG_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # opcional
 STRICT_WHATSAPP = (os.getenv("STRICT_WHATSAPP", "true").lower() == "true")
-PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip()  # https://tu-dominio
+PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip()  # https://tu-dominio.tld
 
-# Memoria simple (para demo)
+# Memoria simple (en producción: DB / Redis)
 STATE = {
     "sid_to_number": {},   # sid -> e164
     "delivery": {},        # e164 -> {status, sid, ...}
-    "last_summary": {}
+    "last_summary": {},
 }
 
+BACKEND_VERSION = "4.1.0"
 
-# ==========================
-#  UTILIDADES
-# ==========================
+
+# =========================
+#   UTILIDADES
+# =========================
 def valid_public_base() -> str:
     """
-    Devuelve PUBLIC_BASE_URL si es https y no localhost; en caso contrario, ''.
-    Evita error 21609 de Twilio cuando se usa http/localhost.
+    Devuelve PUBLIC_BASE_URL si es https y no es localhost; si no, ''.
+    Evita error 21609 de Twilio (callback no https).
     """
     base = PUBLIC_BASE_URL
     if base.lower().startswith("https://") and "localhost" not in base and "127.0.0.1" not in base:
@@ -50,27 +56,19 @@ def valid_public_base() -> str:
     return ""
 
 
-def normalize_to_e164(raw_number: str, region: str = DEFAULT_REGION) -> str:
+def normalize_to_e164(raw_number: str, region: str = None) -> str:
     """
-    Normaliza a E.164. Modo tolerante:
-    1) Intenta con phonenumbers.parse
-    2) Si falla y region == 'MX' y son 10 dígitos → construye +52XXXXXXXXXX
+    Convierte un número a E.164; lanza ValueError si no es posible.
+    Forzamos región MX si no viene una región válida.
     """
-    s = "".join(ch for ch in str(raw_number) if ch.isdigit())
-    if not s:
-        raise ValueError("Número vacío")
-
-    # Intento normal con phonenumbers
+    region = region or DEFAULT_REGION or "MX"
     try:
-        pn = phonenumbers.parse(s, region)
+        pn = phonenumbers.parse(str(raw_number), region)
         if not phonenumbers.is_possible_number(pn) or not phonenumbers.is_valid_number(pn):
-            raise ValueError("Número no válido para región")
+            raise ValueError("Invalid number for region %s" % region)
         return phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164)
-    except (NumberParseException, ValueError):
-        # Fallback MX: 10 dígitos → +52XXXXXXXXXX
-        if region.upper() == "MX" and len(s) == 10:
-            return f"+52{s}"
-        raise ValueError(f"No se pudo normalizar '{raw_number}' (region={region})")
+    except NumberParseException as e:
+        raise ValueError(str(e))
 
 
 def with_whatsapp_prefix(e164: str) -> str:
@@ -79,7 +77,8 @@ def with_whatsapp_prefix(e164: str) -> str:
 
 def lookup_is_valid(e164: str) -> Tuple[bool, Optional[str]]:
     """
-    Twilio Lookup v2 para depuración. NO se usa en los envíos normales.
+    Twilio Lookup v2 para validar y obtener tipo de línea.
+    Devuelve (is_valid, line_type) con line_type en {'mobile','landline','fixed','voip',...} o None.
     """
     try:
         resp = client.lookups.v2.phone_numbers(e164).fetch(fields=["line_type_intelligence"])
@@ -93,8 +92,7 @@ def lookup_is_valid(e164: str) -> Tuple[bool, Optional[str]]:
 
 def whatsapp_policy_allows(line_type: Optional[str]) -> Tuple[bool, str]:
     """
-    Solo móvil si STRICT_WHATSAPP=True.
-    NO se usa en los endpoints de debug/envío actuales.
+    WhatsApp: normalmente SOLO 'mobile'.
     """
     lt = (line_type or "").lower()
     if STRICT_WHATSAPP:
@@ -108,11 +106,11 @@ def whatsapp_policy_allows(line_type: Optional[str]) -> Tuple[bool, str]:
 
 def send_one_whatsapp(to_e164: str, body: str, status_callback_url: Optional[str]) -> str:
     """
-    Envía un WhatsApp de texto.
+    Envía un WhatsApp de texto y regresa el SID.
     """
     kwargs = dict(
         to=with_whatsapp_prefix(to_e164),
-        body=body
+        body=body,
     )
     if status_callback_url:
         kwargs["status_callback"] = status_callback_url
@@ -121,7 +119,7 @@ def send_one_whatsapp(to_e164: str, body: str, status_callback_url: Optional[str
         kwargs["messaging_service_sid"] = MSG_SERVICE_SID
     else:
         if not FROM_WHATSAPP:
-            raise RuntimeError("Configura TWILIO_WHATSAPP_FROM=whatsapp:+1...")
+            raise RuntimeError("Configura TWILIO_WHATSAPP_FROM=whatsapp:+1... en .env")
         kwargs["from_"] = FROM_WHATSAPP
 
     msg = client.messages.create(**kwargs)
@@ -135,18 +133,16 @@ def send_one_whatsapp_template(
     status_callback_url: Optional[str],
 ) -> str:
     """
-    Envía WhatsApp usando una PLANTILLA (Content API de Twilio).
-    - content_sid: SID del template (HX...)
-    - content_variables: dict con variables {"1":"...", "2":"..."}
+    Envía WhatsApp usando PLANTILLA (Content API).
     """
+    import json
+
     kwargs = dict(
         to=with_whatsapp_prefix(to_e164),
-        content_sid=content_sid
+        content_sid=content_sid,
     )
     if content_variables:
-        import json
         kwargs["content_variables"] = json.dumps(content_variables)
-
     if status_callback_url:
         kwargs["status_callback"] = status_callback_url
 
@@ -154,25 +150,24 @@ def send_one_whatsapp_template(
         kwargs["messaging_service_sid"] = MSG_SERVICE_SID
     else:
         if not FROM_WHATSAPP:
-            raise RuntimeError("Configura TWILIO_WHATSAPP_FROM=whatsapp:+1...")
+            raise RuntimeError("Configura TWILIO_WHATSAPP_FROM=whatsapp:+1... en .env")
         kwargs["from_"] = FROM_WHATSAPP
 
     msg = client.messages.create(**kwargs)
     return msg.sid
 
 
-# ==========================
-#  ENDPOINTS ENVÍO TEXTO
-# ==========================
+# =========================
+#   ENDPOINTS — TEXTO
+# =========================
 @app.route("/send-bulk", methods=["POST"])
 def send_bulk():
     """
-    Envío masivo de TEXTO:
+    Body JSON:
     {
       "mensaje": "texto",
       "telefonos": ["656123...", "..."]
     }
-    NO usa Twilio Lookup.
     """
     data = request.get_json(force=True, silent=True) or {}
     body = (data.get("mensaje") or "").strip()
@@ -181,8 +176,10 @@ def send_bulk():
     if not body or not isinstance(nums, list) or not nums:
         return jsonify(error="Proporciona 'mensaje' y lista 'telefonos'"), 400
 
-    invalid_by_lookup = []   # solo errores de normalización
+    invalid_by_lookup = []
     queued = []
+    skipped_not_mobile = []
+    skipped_detail = []
 
     base = valid_public_base()
     status_callback_url = f"{base}/twilio/status" if base else None
@@ -192,333 +189,72 @@ def send_bulk():
         if not raw_str:
             continue
 
+        # 1) Normalizar
         try:
             e164 = normalize_to_e164(raw_str)
-        except ValueError as e:
-            invalid_by_lookup.append(f"{raw_str} ({e})")
+        except ValueError:
+            invalid_by_lookup.append(raw_str)
             continue
 
+        # 2) Lookup
+        is_valid, line_type = lookup_is_valid(e164)
+        if not is_valid:
+            invalid_by_lookup.append(raw_str)
+            continue
+
+        # 3) Política WhatsApp
+        allowed, reason = whatsapp_policy_allows(line_type)
+        if not allowed:
+            skipped_not_mobile.append(raw_str)
+            skipped_detail.append(
+                {
+                    "numero": raw_str,
+                    "line_type": line_type,
+                    "canal": "whatsapp",
+                    "reason": reason,
+                }
+            )
+            continue
+
+        # 4) Enviar
         try:
             sid = send_one_whatsapp(e164, body, status_callback_url)
             STATE["sid_to_number"][sid] = e164
             STATE["delivery"][e164] = {
                 "status": "queued",
                 "sid": sid,
-                "channel": "whatsapp"
+                "channel": "whatsapp",
             }
             queued.append(raw_str)
         except Exception as ex:
             STATE["delivery"][e164] = {
                 "status": "failed_on_send",
                 "reason": str(ex),
-                "channel": "whatsapp"
+                "channel": "whatsapp",
             }
 
     summary = {
         "invalid_by_lookup": invalid_by_lookup,
         "queued": queued,
-        "skipped_not_mobile": [],
-        "skipped_detail": [],
-        "note": "DEBUG: /send-bulk SIN Twilio Lookup (solo normalización E.164)"
+        "skipped_not_mobile": skipped_not_mobile,
+        "skipped_detail": skipped_detail,
+        "note": (
+            "Los 'invalid_by_lookup' no pasaron Lookup/normalización. "
+            "Los 'skipped' no son móviles para WhatsApp. "
+            "El resultado final de entrega para 'queued' llegará vía /twilio/status "
+            "y se puede consultar en /report."
+        ),
     }
     STATE["last_summary"] = summary
     return jsonify(summary), 200
 
 
-# ==========================
-#  ENDPOINTS ENVÍO PLANTILLA
-# ==========================
-@app.route("/send-template", methods=["POST"])
-def send_template():
-    """
-    Envío plantilla: modo simple o por lotes.
-
-    1) Simple:
-    {
-      "content_sid": "HX...",
-      "variables": { "1": "Nombre", "2": "#1234" },
-      "telefonos": ["656123...", "..."]
-    }
-
-    2) Lotes:
-    {
-      "content_sid": "HX...",
-      "lotes": [
-        {
-          "telefono": "656123...",
-          "vars": { "1": "Nombre", "2": "#1234" }
-        }
-      ]
-    }
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    content_sid = (data.get("content_sid") or "").strip()
-    variables_globales = data.get("variables") or {}
-    nums = data.get("telefonos") or []
-    lotes = data.get("lotes") or []
-
-    if not content_sid:
-        return jsonify(error="Proporciona 'content_sid'"), 400
-
-    usar_lotes = bool(lotes)
-    if not usar_lotes and (not isinstance(nums, list) or not nums):
-        return jsonify(error="Proporciona lista 'telefonos' o 'lotes'"), 400
-
-    invalid_by_lookup = []
-    queued = []
-
-    base = valid_public_base()
-    status_callback_url = f"{base}/twilio/status" if base else None
-
-    if usar_lotes:
-        for lote in lotes:
-            raw_str = str(lote.get("telefono", "")).strip()
-            vars_lote = lote.get("vars") or variables_globales or {}
-            if not raw_str:
-                continue
-
-            try:
-                e164 = normalize_to_e164(raw_str)
-            except ValueError as e:
-                invalid_by_lookup.append(f"{raw_str} ({e})")
-                continue
-
-            try:
-                sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
-                STATE["sid_to_number"][sid] = e164
-                STATE["delivery"][e164] = {
-                    "status": "queued",
-                    "sid": sid,
-                    "channel": "whatsapp",
-                    "template": content_sid,
-                    "vars": vars_lote
-                }
-                queued.append(raw_str)
-            except Exception as ex:
-                STATE["delivery"][e164] = {
-                    "status": "failed_on_send",
-                    "reason": str(ex),
-                    "channel": "whatsapp",
-                    "template": content_sid,
-                    "vars": vars_lote
-                }
-    else:
-        for raw in nums:
-            raw_str = str(raw).strip()
-            if not raw_str:
-                continue
-
-            try:
-                e164 = normalize_to_e164(raw_str)
-            except ValueError as e:
-                invalid_by_lookup.append(f"{raw_str} ({e})")
-                continue
-
-            try:
-                sid = send_one_whatsapp_template(e164, content_sid, variables_globales, status_callback_url)
-                STATE["sid_to_number"][sid] = e164
-                STATE["delivery"][e164] = {
-                    "status": "queued",
-                    "sid": sid,
-                    "channel": "whatsapp",
-                    "template": content_sid,
-                    "vars": variables_globales
-                }
-                queued.append(raw_str)
-            except Exception as ex:
-                STATE["delivery"][e164] = {
-                    "status": "failed_on_send",
-                    "reason": str(ex),
-                    "channel": "whatsapp",
-                    "template": content_sid,
-                    "vars": variables_globales
-                }
-
-    return jsonify({
-        "debug": "SEND-TEMPLATE v4",
-        "received": data,
-        "invalid_by_lookup": invalid_by_lookup,
-        "queued": queued,
-        "skipped_not_mobile": [],
-        "skipped_detail": [],
-        "note": "DEBUG: /send-template SIN Twilio Lookup (solo normalización E.164)"
-    }), 200
-
-
-# @app.route("/send-template-bulk-personalizado", methods=["POST"])
-# def send_template_bulk_personalizado():
-#     """
-#     Versión específica para 'lotes' (personalizado):
-
-#     {
-#       "content_sid": "HX...",
-#       "lotes": [
-#         {
-#           "telefono": "2463095291",
-#           "vars": {
-#             "1": "Nombre",
-#             "2": "Tipo trámite",
-#             "3": "Folio",
-#             "4": "Mensaje"
-#           }
-#         }
-#       ]
-#     }
-#     """
-#     data = request.get_json(force=True, silent=True) or {}
-#     content_sid = (data.get("content_sid") or "").strip()
-#     lotes = data.get("lotes") or []
-
-#     if not content_sid:
-#         return jsonify(error="Falta 'content_sid'"), 400
-#     if not isinstance(lotes, list) or not lotes:
-#         return jsonify(error="Falta lista 'lotes'"), 400
-
-#     invalid_by_lookup = []
-#     queued = []
-
-#     base = valid_public_base()
-#     status_callback_url = f"{base}/twilio/status" if base else None
-
-#     for lote in lotes:
-#         raw_str = str(lote.get("telefono", "")).strip()
-#         vars_lote = lote.get("vars") or {}
-#         if not raw_str:
-#             continue
-
-#         try:
-#             e164 = normalize_to_e164(raw_str)
-#         except ValueError as e:
-#             invalid_by_lookup.append(f"{raw_str} ({e})")
-#             continue
-
-#         try:
-#             sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
-#             STATE["sid_to_number"][sid] = e164
-#             STATE["delivery"][e164] = {
-#                 "status": "queued",
-#                 "sid": sid,
-#                 "channel": "whatsapp",
-#                 "template": content_sid,
-#                 "vars": vars_lote
-#             }
-#             queued.append(raw_str)
-#         except Exception as ex:
-#             STATE["delivery"][e164] = {
-#                 "status": "failed_on_send",
-#                 "reason": str(ex),
-#                 "channel": "whatsapp",
-#                 "template": content_sid,
-#                 "vars": vars_lote
-#             }
-
-#     return jsonify({
-#         "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4",
-#         "received": data,
-#         "invalid_by_lookup": invalid_by_lookup,
-#         "queued": queued,
-#         "skipped_not_mobile": [],
-#         "skipped_detail": [],
-#         "note": "DEBUG DO: /send-template-bulk-personalizado SIN Twilio Lookup"
-#     }), 200
-@app.route("/send-template-bulk-personalizado", methods=["POST"])
-def send_template_bulk_personalizado():
-    """
-    Versión específica para 'lotes' (personalizado):
-
-    {
-      "content_sid": "HX...",
-      "lotes": [
-        {
-          "telefono": "2463095291",
-          "vars": {
-            "1": "Nombre",
-            "2": "Tipo trámite",
-            "3": "Folio",
-            "4": "Mensaje"
-          }
-        }
-      ]
-    }
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    content_sid = (data.get("content_sid") or "").strip()
-    lotes = data.get("lotes") or []
-
-    if not content_sid:
-        return jsonify(error="Falta 'content_sid'"), 400
-    if not isinstance(lotes, list) or not lotes:
-        return jsonify(error="Falta lista 'lotes'"), 400
-
-    invalid_by_lookup = []
-    queued = []
-    failed_on_send = []   # 👈 nuevo
-
-    base = valid_public_base()
-    status_callback_url = f"{base}/twilio/status" if base else None
-
-    for lote in lotes:
-        raw_str = str(lote.get("telefono", "")).strip()
-        vars_lote = lote.get("vars") or {}
-        if not raw_str:
-            continue
-
-        # 1) Normalizar a E.164
-        try:
-            e164 = normalize_to_e164(raw_str)
-        except ValueError as e:
-            invalid_by_lookup.append(f"{raw_str} ({e})")
-            continue
-
-        # 2) Enviar plantilla
-        try:
-            sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
-            STATE["sid_to_number"][sid] = e164
-            STATE["delivery"][e164] = {
-                "status": "queued",
-                "sid": sid,
-                "channel": "whatsapp",
-                "template": content_sid,
-                "vars": vars_lote
-            }
-            queued.append(raw_str)
-        except Exception as ex:
-            # Guardamos en memoria
-            STATE["delivery"][e164] = {
-                "status": "failed_on_send",
-                "reason": str(ex),
-                "channel": "whatsapp",
-                "template": content_sid,
-                "vars": vars_lote
-            }
-            # Y también lo devolvemos en la respuesta
-            failed_on_send.append({
-                "numero": raw_str,
-                "e164": e164,
-                "reason": str(ex)
-            })
-
-    return jsonify({
-        "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4",
-        "received": data,
-        "invalid_by_lookup": invalid_by_lookup,
-        "queued": queued,
-        "failed_on_send": failed_on_send,   # 👈 aquí
-        "skipped_not_mobile": [],
-        "skipped_detail": [],
-        "note": "DEBUG DO: /send-template-bulk-personalizado SIN Twilio Lookup"
-    }), 200
-
-
-# ==========================
-#  ENDPOINTS AUXILIARES
-# ==========================
 @app.route("/debug-lookup", methods=["POST"])
 def debug_lookup():
     """
     Body:
     { "telefonos": ["6568954038", "6561234657", ...] }
-    Solo para ver cómo responde Twilio Lookup.
+    Devuelve normalización + Lookup + line_type.
     """
     data = request.get_json(force=True, silent=True) or {}
     nums = data.get("telefonos") or []
@@ -539,6 +275,180 @@ def debug_lookup():
     return jsonify(out), 200
 
 
+# =========================
+#   ENDPOINTS — PLANTILLAS
+# =========================
+@app.route("/send-template", methods=["POST"])
+def send_template():
+    """
+    Envía UNA plantilla a muchos números (mismas variables para todos).
+    Body:
+    {
+      "content_sid": "HX...",
+      "variables": { "1": "Nombre", "2": "Folio" },
+      "telefonos": ["656...", "..."]
+    }
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    content_sid = (data.get("content_sid") or "").strip()
+    variables = data.get("variables") or {}
+    nums = data.get("telefonos") or []
+
+    if not content_sid or not isinstance(nums, list) or not nums:
+        return jsonify(error="Proporciona 'content_sid' y lista 'telefonos'"), 400
+
+    invalid_by_norm = []
+    queued = []
+    failed_on_send = []
+
+    base = valid_public_base()
+    status_callback_url = f"{base}/twilio/status" if base else None
+
+    for raw in nums:
+        raw_str = str(raw).strip()
+        if not raw_str:
+            continue
+
+        try:
+            e164 = normalize_to_e164(raw_str)
+        except ValueError as e:
+            invalid_by_norm.append(f"{raw_str} ({e})")
+            continue
+
+        try:
+            sid = send_one_whatsapp_template(e164, content_sid, variables, status_callback_url)
+            STATE["sid_to_number"][sid] = e164
+            STATE["delivery"][e164] = {
+                "status": "queued",
+                "sid": sid,
+                "channel": "whatsapp",
+                "template": content_sid,
+                "vars": variables,
+            }
+            queued.append(raw_str)
+        except Exception as ex:
+            err_str = str(ex)
+            STATE["delivery"][e164] = {
+                "status": "failed_on_send",
+                "reason": err_str,
+                "channel": "whatsapp",
+                "template": content_sid,
+                "vars": variables,
+            }
+            failed_on_send.append(
+                {
+                    "numero": raw_str,
+                    "e164": e164,
+                    "reason": err_str,
+                }
+            )
+
+    return jsonify(
+        {
+            "debug": "SEND-TEMPLATE simple",
+            "received": data,
+            "invalid_by_norm": invalid_by_norm,
+            "queued": queued,
+            "failed_on_send": failed_on_send,
+            "note": "Uso de plantilla con mismas variables para todos.",
+        }
+    ), 200
+
+
+@app.route("/send-template-bulk-personalizado", methods=["POST"])
+def send_template_bulk_personalizado():
+    """
+    Envía PLANTILLAS por lote SIN Twilio Lookup.
+    Body:
+    {
+      "content_sid": "HX84a8...",
+      "lotes": [
+        {
+          "telefono": "6142249654",
+          "vars": {
+            "1": "Nombre",
+            "2": "Tipo trámite",
+            "3": "Folio",
+            "4": "Mensaje"
+          }
+        },
+        ...
+      ]
+    }
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    content_sid = (data.get("content_sid") or "").strip()
+    lotes = data.get("lotes") or []
+
+    if not content_sid:
+        return jsonify(error="Falta 'content_sid'"), 400
+    if not isinstance(lotes, list) or not lotes:
+        return jsonify(error="Falta lista 'lotes'"), 400
+
+    invalid_by_norm = []
+    queued = []
+    failed_on_send = []
+
+    base = valid_public_base()
+    status_callback_url = f"{base}/twilio/status" if base else None
+
+    for lote in lotes:
+        raw_str = str(lote.get("telefono", "")).strip()
+        vars_lote = lote.get("vars") or {}
+        if not raw_str:
+            continue
+
+        # 1) SOLO normalizamos
+        try:
+            e164 = normalize_to_e164(raw_str)
+        except ValueError as e:
+            invalid_by_norm.append(f"{raw_str} ({e})")
+            continue
+
+        # 2) Enviar
+        try:
+            sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
+            STATE["sid_to_number"][sid] = e164
+            STATE["delivery"][e164] = {
+                "status": "queued",
+                "sid": sid,
+                "channel": "whatsapp",
+                "template": content_sid,
+                "vars": vars_lote,
+            }
+            queued.append(raw_str)
+        except Exception as ex:
+            err_str = str(ex)
+            STATE["delivery"][e164] = {
+                "status": "failed_on_send",
+                "reason": err_str,
+                "channel": "whatsapp",
+                "template": content_sid,
+                "vars": vars_lote,
+            }
+            failed_on_send.append(
+                {
+                    "numero": raw_str,
+                    "e164": e164,
+                    "reason": err_str,
+                }
+            )
+
+    return jsonify(
+        {
+            "debug": "SEND-TEMPLATE-BULK-PERSONALIZADO v4.1",
+            "received": data,
+            "invalid_by_norm": invalid_by_norm,
+            "queued": queued,
+            "failed_on_send": failed_on_send,
+            "note": "DEBUG DO: /send-template-bulk-personalizado SIN Twilio Lookup",
+        }
+    ), 200
+
+
+# =========================
+#   STATUS / REPORTES
+# =========================
 @app.route("/twilio/status", methods=["POST"])
 def twilio_status():
     sid = request.form.get("MessageSid")
@@ -572,18 +482,42 @@ def report():
         else:
             pending.append(e164)
 
-    return jsonify({
-        "delivered": delivered,
-        "failed_or_undelivered": failed,
-        "pending": pending,
-        "raw": STATE["delivery"],
-        "last_summary": STATE.get("last_summary", {})
-    }), 200
+    return jsonify(
+        {
+            "delivered": delivered,
+            "failed_or_undelivered": failed,
+            "pending": pending,
+            "raw": STATE["delivery"],
+            "last_summary": STATE.get("last_summary", {}),
+        }
+    ), 200
 
 
+@app.route("/status-detail/<sid>", methods=["GET"])
+def status_detail(sid):
+    try:
+        msg = client.messages(sid).fetch()
+        return jsonify(
+            {
+                "sid": msg.sid,
+                "status": msg.status,
+                "to": msg.to,
+                "from": msg.from_,
+                "error_code": msg.error_code,
+                "error_message": msg.error_message,
+                "date_sent": str(msg.date_sent) if msg.date_sent else None,
+            }
+        ), 200
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+# =========================
+#   OTROS
+# =========================
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify(ok=True, app="whatsapp-bulk", version="4.0.0"), 200
+    return jsonify(ok=True, app="whatsapp-bulk", version=BACKEND_VERSION), 200
 
 
 @app.route("/twilio/incoming", methods=["POST"])
@@ -597,53 +531,37 @@ def twilio_incoming_fallback():
     return ("", 200)
 
 
-@app.route("/status-detail/<sid>", methods=["GET"])
-def status_detail(sid):
-    try:
-        msg = client.messages(sid).fetch()
-        return jsonify({
-            "sid": msg.sid,
-            "status": msg.status,
-            "to": msg.to,
-            "from": msg.from_,
-            "error_code": msg.error_code,
-            "error_message": msg.error_message,
-            "date_sent": str(msg.date_sent) if msg.date_sent else None
-        }), 200
-    except Exception as e:
-        return jsonify(error=str(e)), 400
-
-
 @app.route("/tester", methods=["GET"])
 def tester():
-    # Igual que lo tenías, solo sirve de front para probar.
-    html = """<!doctype html>
+    html = f"""
+<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
   <title>Tester — WhatsApp Bulk</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { --ink:#222; --muted:#666; --accent:#2563eb; --bg:#f6f7fb; }
-    body{ font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:var(--ink); background:var(--bg); margin:0; }
-    .wrap{ max-width: 980px; margin: 32px auto; background:#fff; border-radius:12px; padding:20px; box-shadow: 0 10px 25px rgba(0,0,0,.06); }
-    h1{ font-size: 20px; margin: 0 0 12px; }
-    .row{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
-    label{ font-weight:600; font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
-    select, input, textarea{ width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:8px; font: inherit; }
-    textarea{ min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .btns{ display:flex; gap:10px; flex-wrap:wrap; }
-    button{ padding:10px 14px; border-radius:8px; border:0; cursor:pointer; font-weight:600; }
-    .primary{ background:var(--accent); color:#fff; }
-    .ghost{ background:#eef2ff; color:#1e3a8a; }
-    pre{ background:#0b1020; color:#e6edf3; padding:14px; border-radius:8px; overflow:auto; max-height: 55vh; }
-    small{ color:var(--muted); }
+    :root {{ --ink:#222; --muted:#666; --accent:#2563eb; --bg:#f6f7fb; }}
+    body{{ font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:var(--ink); background:var(--bg); margin:0; }}
+    .wrap{{ max-width: 980px; margin: 32px auto; background:#fff; border-radius:12px; padding:20px; box-shadow: 0 10px 25px rgba(0,0,0,.06); }}
+    h1{{ font-size: 20px; margin: 0 0 12px; }}
+    .row{{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; }}
+    label{{ font-weight:600; font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }}
+    select, input, textarea{{ width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:8px; font: inherit; }}
+    textarea{{ min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+    .btns{{ display:flex; gap:10px; flex-wrap:wrap; }}
+    button{{ padding:10px 14px; border-radius:8px; border:0; cursor:pointer; font-weight:600; }}
+    .primary{{ background:var(--accent); color:#fff; }}
+    .ghost{{ background:#eef2ff; color:#1e3a8a; }}
+    pre{{ background:#0b1020; color:#e6edf3; padding:14px; border-radius:8px; overflow:auto; max-height: 55vh; }}
+    small{{ color:var(--muted); }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Tester — WhatsApp Bulk</h1>
     <p><small>Pega tu JSON, elige método y endpoint. Esto hace <code>fetch</code> directo a tu backend.</small></p>
+    <p><small>Versión backend: {BACKEND_VERSION} — endpoints /send-bulk, /send-template, /send-template-bulk-personalizado.</small></p>
 
     <div class="row">
       <div style="flex:1 1 140px;">
@@ -675,14 +593,16 @@ def tester():
 
     <div class="btns" style="margin-top:10px;">
       <button class="ghost" id="loadSend">Ejemplo: /send-bulk</button>
+      <button class="ghost" id="loadTemplate">Ejemplo: /send-template</button>
+      <button class="ghost" id="loadTemplateBulk">Ejemplo: /send-template-bulk-personalizado</button>
       <button class="ghost" id="loadLookup">Ejemplo: /debug-lookup</button>
       <button class="primary" id="sendBtn">Enviar</button>
     </div>
 
-    <p><small>Versión backend: 4.0.0 — endpoints /send-bulk, /send-template, /send-template-bulk-personalizado.</small></p>
+    <p><small>Regla: token exige 2 variables ("1", "2"). content_di exige 4 ("1"–"4").</small></p>
 
     <h3>Respuesta</h3>
-    <pre id="out">{}</pre>
+    <pre id="out">{{}}</pre>
   </div>
 
   <script>
@@ -693,67 +613,99 @@ def tester():
     const outEl    = document.getElementById('out');
     const sendBtn  = document.getElementById('sendBtn');
     const loadSend = document.getElementById('loadSend');
+    const loadTemplate = document.getElementById('loadTemplate');
+    const loadTemplateBulk = document.getElementById('loadTemplateBulk');
     const loadLookup = document.getElementById('loadLookup');
 
-    quickEl.addEventListener('change', () => {
+    quickEl.addEventListener('change', () => {{
       const v = quickEl.value;
       if (v === '__custom') return;
       endEl.value = v;
-    });
+    }});
 
-    loadSend.addEventListener('click', () => {
+    loadSend.addEventListener('click', () => {{
       methodEl.value = 'POST';
       endEl.value = '/send-bulk';
-      bodyEl.value = JSON.stringify({
+      bodyEl.value = JSON.stringify({{
         "mensaje": "Su trámite ha sido firmado; acuda a la dependencia con su documentación.",
         "telefonos": ["6561234657","6568954038","6567689214"]
-      }, null, 2);
-    });
+      }}, null, 2);
+    }});
 
-    loadLookup.addEventListener('click', () => {
+    loadTemplate.addEventListener('click', () => {{
+      methodEl.value = 'POST';
+      endEl.value = '/send-template';
+      bodyEl.value = JSON.stringify({{
+        "content_sid": "HXxxxxxxxxxxxxxxxxxxxxxxxx",
+        "variables": {{"1":"Nombre prueba","2":"#FOLIO-123"}},
+        "telefonos": ["6561234657"]
+      }}, null, 2);
+    }});
+
+    loadTemplateBulk.addEventListener('click', () => {{
+      methodEl.value = 'POST';
+      endEl.value = '/send-template-bulk-personalizado';
+      bodyEl.value = JSON.stringify({{
+        "content_sid": "HX84a8154d5e0e2fb79b55f0053e2e5a55",
+        "lotes": [
+          {{
+            "telefono": "6142249654",
+            "vars": {{
+              "1": "Jaime Prueba",
+              "2": "Licencia de construcción",
+              "3": "DGDU/LC/0069/2025",
+              "4": "Verificación Rechazada"
+            }}
+          }}
+        ]
+      }}, null, 2);
+    }});
+
+    loadLookup.addEventListener('click', () => {{
       methodEl.value = 'POST';
       endEl.value = '/debug-lookup';
-      bodyEl.value = JSON.stringify({
-        "telefonos": ["6568954038","6561234657","6567689214"]
-      }, null, 2);
-    });
+      bodyEl.value = JSON.stringify({{
+        "telefonos": ["6142249654","2463095291","6563023022"]
+      }}, null, 2);
+    }});
 
-    sendBtn.addEventListener('click', async () => {
+    sendBtn.addEventListener('click', async () => {{
       const method = methodEl.value.trim();
       const endpoint = endEl.value.trim() || '/send-bulk';
-      let init = { method, headers: {} };
+      let init = {{ method, headers: {{}} }};
 
-      if (method === 'POST') {
-        let payload = {};
-        try {
-          payload = bodyEl.value ? JSON.parse(bodyEl.value) : {};
-        } catch (e) {
+      if (method === 'POST') {{
+        let payload = {{}};
+        try {{
+          payload = bodyEl.value ? JSON.parse(bodyEl.value) : {{}};
+        }} catch (e) {{
           outEl.textContent = "❌ JSON inválido en el body: " + e.message;
           return;
-        }
+        }}
         init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(payload);
-      }
+      }}
 
       outEl.textContent = "Enviando...";
-      try {
+      try {{
         const res = await fetch(endpoint, init);
         const text = await res.text();
-        try {
+        try {{
           const json = JSON.parse(text);
           outEl.textContent = JSON.stringify(json, null, 2);
-        } catch {
+        }} catch {{
           outEl.textContent = text;
-        }
-      } catch (err) {
+        }}
+      }} catch (err) {{
         outEl.textContent = "❌ Error de red: " + (err?.message || err);
-      }
-    });
+      }}
+    }});
 
     loadSend.click();
   </script>
 </body>
-</html>"""
+</html>
+    """
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
