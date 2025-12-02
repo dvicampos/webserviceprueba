@@ -337,6 +337,12 @@ def send_one_whatsapp_template(to_e164: str, content_sid: str, content_variables
 
 @app.route("/send-template", methods=["POST"])
 def send_template():
+    """
+    MODO DEBUG:
+    - NO usa Twilio Lookup
+    - NO valida tipo de línea (mobile/fijo)
+    - Solo normaliza con phonenumbers y envía la plantilla
+    """
     data = request.get_json(force=True, silent=True) or {}
     content_sid = (data.get("content_sid") or "").strip()
     variables_globales = data.get("variables") or {}
@@ -344,17 +350,17 @@ def send_template():
     lotes = data.get("lotes") or []
 
     if not content_sid:
-        return jsonify(error="Proporciona 'content_sid'"), 400
+        return jsonify(error="Proporciona 'content_sid' (DEBUG)"), 400
 
     usar_lotes = bool(lotes)
 
     if not usar_lotes and (not isinstance(nums, list) or not nums):
-        return jsonify(error="Proporciona lista 'telefonos' o 'lotes'"), 400
+        return jsonify(error="Proporciona lista 'telefonos' o 'lotes' (DEBUG)"), 400
 
-    invalid_by_lookup = []
-    skipped_not_mobile = []
+    invalid_by_lookup = []      # aquí SOLO entran errores de normalización
+    skipped_not_mobile = []     # no lo usamos en debug
+    skipped_detail = []         # no lo usamos en debug
     queued = []
-    skipped_detail = []
 
     base = valid_public_base()
     status_callback_url = f"{base}/twilio/status" if base else None
@@ -368,14 +374,13 @@ def send_template():
             if not raw_str:
                 continue
 
-            # 1) Normaliza SOLO con phonenumbers
             try:
+                # SOLO normalizamos a E.164
                 e164 = normalize_to_e164(raw_str)
             except ValueError:
                 invalid_by_lookup.append(raw_str)
                 continue
 
-            # 2) Enviar directo SIN lookup ni política
             try:
                 sid = send_one_whatsapp_template(e164, content_sid, vars_lote, status_callback_url)
                 STATE["sid_to_number"][sid] = e164
@@ -399,6 +404,9 @@ def send_template():
         # ---------- MODO SIMPLE (telefonos + variables_globales, SIN LOOKUP) ----------
         for raw in nums:
             raw_str = str(raw).strip()
+            if not raw_str:
+                continue
+
             try:
                 e164 = normalize_to_e164(raw_str)
             except ValueError:
@@ -430,7 +438,7 @@ def send_template():
         "queued": queued,
         "skipped_not_mobile": skipped_not_mobile,
         "skipped_detail": skipped_detail,
-        "note": "Plantilla enviada SIN Twilio Lookup (modo debug). Revisa /report y /status-detail/<sid>."
+        "note": "DEBUG send-template SIN Lookup v1"
     }), 200
 
 @app.route("/tester", methods=["GET"])
