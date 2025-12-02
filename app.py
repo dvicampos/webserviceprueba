@@ -357,16 +357,15 @@ def send_template():
     if not usar_lotes and (not isinstance(nums, list) or not nums):
         return jsonify(error="Proporciona lista 'telefonos' o 'lotes' (DEBUG)"), 400
 
-    invalid_by_lookup = []      # aquí SOLO entran errores de normalización
-    skipped_not_mobile = []     # no lo usamos en debug
-    skipped_detail = []         # no lo usamos en debug
+    invalid_by_lookup = []
+    skipped_not_mobile = []
+    skipped_detail = []
     queued = []
 
     base = valid_public_base()
     status_callback_url = f"{base}/twilio/status" if base else None
 
     if usar_lotes:
-        # ---------- MODO LOTES (SIN LOOKUP) ----------
         for lote in lotes:
             raw_str = str(lote.get("telefono", "")).strip()
             vars_lote = lote.get("vars") or variables_globales or {}
@@ -375,7 +374,6 @@ def send_template():
                 continue
 
             try:
-                # SOLO normalizamos a E.164
                 e164 = normalize_to_e164(raw_str)
             except ValueError:
                 invalid_by_lookup.append(raw_str)
@@ -401,7 +399,6 @@ def send_template():
                     "vars": vars_lote
                 }
     else:
-        # ---------- MODO SIMPLE (telefonos + variables_globales, SIN LOOKUP) ----------
         for raw in nums:
             raw_str = str(raw).strip()
             if not raw_str:
@@ -434,11 +431,13 @@ def send_template():
                 }
 
     return jsonify({
+        "debug": "SEND-TEMPLATE V3 - DVICA",
+        "received": data,
         "invalid_by_lookup": invalid_by_lookup,
         "queued": queued,
         "skipped_not_mobile": skipped_not_mobile,
         "skipped_detail": skipped_detail,
-        "note": "DEBUG send-template SIN Lookup v1"
+        "note": "DEBUG send-template SIN Lookup v3"
     }), 200
 
 @app.route("/tester", methods=["GET"])
