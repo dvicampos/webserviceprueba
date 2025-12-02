@@ -531,7 +531,7 @@ def twilio_incoming_fallback():
 
 @app.route("/tester", methods=["GET"])
 def tester():
-    html = f"""
+    html = """
 <!doctype html>
 <html lang="es">
 <head>
@@ -539,27 +539,27 @@ def tester():
   <title>Tester — WhatsApp Bulk</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root {{ --ink:#222; --muted:#666; --accent:#2563eb; --bg:#f6f7fb; }}
-    body{{ font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:var(--ink); background:var(--bg); margin:0; }}
-    .wrap{{ max-width: 980px; margin: 32px auto; background:#fff; border-radius:12px; padding:20px; box-shadow: 0 10px 25px rgba(0,0,0,.06); }}
-    h1{{ font-size: 20px; margin: 0 0 12px; }}
-    .row{{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; }}
-    label{{ font-weight:600; font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }}
-    select, input, textarea{{ width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:8px; font: inherit; }}
-    textarea{{ min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-    .btns{{ display:flex; gap:10px; flex-wrap:wrap; }}
-    button{{ padding:10px 14px; border-radius:8px; border:0; cursor:pointer; font-weight:600; }}
-    .primary{{ background:var(--accent); color:#fff; }}
-    .ghost{{ background:#eef2ff; color:#1e3a8a; }}
-    pre{{ background:#0b1020; color:#e6edf3; padding:14px; border-radius:8px; overflow:auto; max-height: 55vh; }}
-    small{{ color:var(--muted); }}
+    :root { --ink:#222; --muted:#666; --accent:#2563eb; --bg:#f6f7fb; }
+    body{ font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:var(--ink); background:var(--bg); margin:0; }
+    .wrap{ max-width: 980px; margin: 32px auto; background:#fff; border-radius:12px; padding:20px; box-shadow: 0 10px 25px rgba(0,0,0,.06); }
+    h1{ font-size: 20px; margin: 0 0 12px; }
+    .row{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+    label{ font-weight:600; font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+    select, input, textarea{ width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:8px; font: inherit; }
+    textarea{ min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .btns{ display:flex; gap:10px; flex-wrap:wrap; }
+    button{ padding:10px 14px; border-radius:8px; border:0; cursor:pointer; font-weight:600; }
+    .primary{ background:var(--accent); color:#fff; }
+    .ghost{ background:#eef2ff; color:#1e3a8a; }
+    pre{ background:#0b1020; color:#e6edf3; padding:14px; border-radius:8px; overflow:auto; max-height: 55vh; }
+    small{ color:var(--muted); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Tester — WhatsApp Bulk</h1>
     <p><small>Pega tu JSON, elige método y endpoint. Esto hace <code>fetch</code> directo a tu backend.</small></p>
-    <p><small>Versión backend: {BACKEND_VERSION} — endpoints /send-bulk, /send-template, /send-template-bulk-personalizado.</small></p>
+    <p><small>Versión backend: """ + BACKEND_VERSION + """ — endpoints /send-bulk, /send-template, /send-template-bulk-personalizado.</small></p>
 
     <div class="row">
       <div style="flex:1 1 140px;">
@@ -600,7 +600,7 @@ def tester():
     <p><small>Regla: token exige 2 variables ("1", "2"). content_di exige 4 ("1"–"4").</small></p>
 
     <h3>Respuesta</h3>
-    <pre id="out">{{}}</pre>
+    <pre id="out">{}</pre>
   </div>
 
   <script>
@@ -706,7 +706,6 @@ def tester():
 </html>
     """
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
