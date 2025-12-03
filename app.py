@@ -424,7 +424,7 @@ def tester():
       }
     });
 
-    // Carga ejemplo por defecto
+    
     loadTemplateBulk.click();
   </script>
 </body>
